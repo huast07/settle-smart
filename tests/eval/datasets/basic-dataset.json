@@ -1,0 +1,22 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "greeting",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "Hello, what can you help me with?"}]
+      }
+    },
+    {
+      "eval_case_id": "newcomer_rewards_query",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Country of origin: India. Destination: Toronto, Ontario, Canada. Age: 34. Family: spouse age 33 and child age 5. Please find loyalty and rewards programs for essentials."
+          }
+        ]
+      }
+    }
+  ]
+}
