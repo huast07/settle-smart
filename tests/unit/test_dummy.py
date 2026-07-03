@@ -13,13 +13,9 @@
 # limitations under the License.
 from app.agent import (
     CUSTOMIZATION_SKILL,
-    ELIGIBILITY_SEARCH_SKILL,
     HouseholdMember,
     NewcomerProfile,
-    PROGRAM_SEARCH_SKILL,
     RECOMMENDATION_SKILL,
-    SIGNUP_PROCESS_SKILL,
-    VERIFICATION_SKILL,
     _build_priority_categories,
     _looks_like_complete_profile,
     _profile_missing_fields,
@@ -91,19 +87,11 @@ def test_priority_categories_reflect_demographics() -> None:
 
 def test_runtime_skills_are_loaded_with_progressive_resources() -> None:
     assert CUSTOMIZATION_SKILL.name == "customization-skill"
-    assert PROGRAM_SEARCH_SKILL.name == "program-search-skill"
-    assert ELIGIBILITY_SEARCH_SKILL.name == "eligibility-search-skill"
-    assert VERIFICATION_SKILL.name == "verification-skill"
-    assert SIGNUP_PROCESS_SKILL.name == "signup-process-skill"
     assert RECOMMENDATION_SKILL.name == "recommendation-skill"
 
     assert CUSTOMIZATION_SKILL.resources.list_references() == [
         "essential-categories.md"
     ]
-    assert PROGRAM_SEARCH_SKILL.resources.list_references() == []
-    assert ELIGIBILITY_SEARCH_SKILL.resources.list_references() == []
-    assert VERIFICATION_SKILL.resources.list_references() == ["source-quality.md"]
-    assert SIGNUP_PROCESS_SKILL.resources.list_references() == []
     assert RECOMMENDATION_SKILL.resources.list_references() == [
         "ranking-rubric.md"
     ]

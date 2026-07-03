@@ -781,7 +781,7 @@ async def recommendations(intake: NewcomerIntake) -> JSONResponse:
                 ],
             },
         )
-    except Exception as exc:  # Keep the dashboard useful during local credential gaps.
+    except Exception as exc:
         return JSONResponse(
             status_code=502,
             content={

@@ -7,7 +7,7 @@ from app.agent import (
 )
 
 
-def test_program_search_result_accepts_missing_evidence_summary() -> None:
+def test_program_search_result_keeps_missing_evidence_summary_blank() -> None:
     result = ProgramSearchResult.model_validate(
         {
             "destination": "San Francisco, California, United States",
@@ -26,11 +26,7 @@ def test_program_search_result_accepts_missing_evidence_summary() -> None:
     )
 
     program = result.discovered_programs[0]
-    assert program.evidence_summary == (
-        "Apply on the official transit agency website. "
-        "Verify residency or service-area requirements. "
-        "Source: https://example.test/transit"
-    )
+    assert program.evidence_summary == ""
     assert program.confidence == "medium"
 
 
@@ -140,3 +136,21 @@ def test_program_search_text_notes_are_converted_to_structured_result() -> None:
     assert result.discovered_programs[0].program_name == "Example Rewards"
     assert result.discovered_programs[0].source_url == "https://example.test"
     assert result.discovered_programs[0].confidence == "high"
+
+
+def test_program_search_text_notes_skip_incomplete_programs() -> None:
+    prompt = ProgramSearchPrompt(
+        destination="San Francisco, California, United States",
+        search_objective="Find verified programs.",
+        priority_categories=[],
+        suggested_queries=["San Francisco grocery rewards official"],
+        verification_rules=["Prefer official pages."],
+    )
+
+    result = _program_search_result_from_agent_output(
+        output="Program: Incomplete Rewards; Category: Food and groceries",
+        prompt=prompt,
+        search_agent_name="discover_food_household_programs",
+    )
+
+    assert result.discovered_programs == []

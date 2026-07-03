@@ -31,32 +31,17 @@ from google.adk.tools.skill_toolset import SkillToolset
 from google.adk.utils.variant_utils import GoogleLLMVariant, get_google_llm_variant
 from google.adk.workflow import JoinNode, Workflow, node
 from google.genai import types
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 load_dotenv(Path(__file__).with_name(".env"))
 
 
 SKILLS_DIR = Path(__file__).with_name("skills")
 CUSTOMIZATION_SKILL = load_skill_from_dir(SKILLS_DIR / "customization-skill")
-PROGRAM_SEARCH_SKILL = load_skill_from_dir(SKILLS_DIR / "program-search-skill")
-ELIGIBILITY_SEARCH_SKILL = load_skill_from_dir(SKILLS_DIR / "eligibility-search-skill")
-VERIFICATION_SKILL = load_skill_from_dir(SKILLS_DIR / "verification-skill")
-SIGNUP_PROCESS_SKILL = load_skill_from_dir(SKILLS_DIR / "signup-process-skill")
 RECOMMENDATION_SKILL = load_skill_from_dir(SKILLS_DIR / "recommendation-skill")
 
 customization_skill_toolset = SkillToolset(skills=[CUSTOMIZATION_SKILL])
 recommendation_skill_toolset = SkillToolset(skills=[RECOMMENDATION_SKILL])
-
-
-def _new_search_skill_toolset() -> SkillToolset:
-    return SkillToolset(
-        skills=[
-            PROGRAM_SEARCH_SKILL,
-            ELIGIBILITY_SEARCH_SKILL,
-            VERIFICATION_SKILL,
-            SIGNUP_PROCESS_SKILL,
-        ]
-    )
 
 
 class ServerSideAwareGoogleSearchTool(GoogleSearchTool):
@@ -192,21 +177,6 @@ class DiscoveredProgram(BaseModel):
         default="medium",
         description="Use high, medium, or low based on source quality and local relevance."
     )
-
-    @model_validator(mode="after")
-    def _fill_evidence_summary(self) -> "DiscoveredProgram":
-        if self.evidence_summary.strip():
-            return self
-        fallback_parts = [
-            self.signup_path,
-            self.eligibility_notes,
-            f"Source: {self.source_url}" if self.source_url else "",
-        ]
-        self.evidence_summary = (
-            " ".join(part.strip() for part in fallback_parts if part.strip())
-            or "Evidence summary was not provided; verify details on the official provider page."
-        )
-        return self
 
 
 class ProgramSearchResult(BaseModel):
@@ -530,46 +500,14 @@ def _plan_from_any(value: RecommendationPlan | dict[str, Any]) -> Recommendation
     return RecommendationPlan.model_validate(value)
 
 
-def _fallback_support_needs_plan(
-    fallback_context: CustomizationContext | dict[str, Any],
-) -> SupportNeedsPlan:
-    context = (
-        fallback_context
-        if isinstance(fallback_context, CustomizationContext)
-        else CustomizationContext.model_validate(fallback_context)
-    )
-    priority_categories = context.baseline_categories or _build_priority_categories(
-        context.profile
-    )
-    category_names = ", ".join(
-        category.category for category in priority_categories
-    ) or "essential newcomer services"
-    return SupportNeedsPlan(
-        profile=context.profile,
-        comparison=context.comparison,
-        priority_categories=priority_categories,
-        priority_summary=(
-            "The customization model did not return a structured plan, so the "
-            f"workflow is using conservative baseline essentials: {category_names}."
-        ),
-    )
-
-
 def _support_needs_plan_from_any(
-    value: SupportNeedsPlan | dict[str, Any] | None,
-    *,
-    fallback_context: CustomizationContext | dict[str, Any] | None = None,
+    value: SupportNeedsPlan | dict[str, Any],
 ) -> SupportNeedsPlan:
     if isinstance(value, SupportNeedsPlan):
         return value
     if isinstance(value, dict):
         return SupportNeedsPlan.model_validate(value)
-    if value is None and fallback_context is not None:
-        return _fallback_support_needs_plan(fallback_context)
-    raise RuntimeError(
-        "customize_essentials returned no support_needs_plan and no "
-        "customization_context was available for a deterministic fallback."
-    )
+    raise TypeError("Expected SupportNeedsPlan or dict from customize_essentials.")
 
 
 def _looks_like_complete_profile(text: str) -> bool:
@@ -1107,12 +1045,9 @@ customize_essentials = LlmAgent(
 
 @node(name="build_program_search_prompt")
 def build_program_search_prompt(
-    ctx: Context, node_input: SupportNeedsPlan | dict[str, Any] | None = None
+    ctx: Context, node_input: SupportNeedsPlan | dict[str, Any]
 ) -> Event:
-    plan = _support_needs_plan_from_any(
-        node_input,
-        fallback_context=ctx.state.get("customization_context"),
-    )
+    plan = _support_needs_plan_from_any(node_input)
     destination = plan.profile.destination
     suggested_queries: list[str] = []
     for category in plan.priority_categories:
@@ -1410,16 +1345,25 @@ def _parse_program_notes(search_text: str) -> list[DiscoveredProgram]:
             else:
                 fields[key] = value
 
-        if not fields.get("program_name"):
+        if not all(
+            fields.get(required_field)
+            for required_field in (
+                "program_name",
+                "provider",
+                "category",
+                "source_url",
+                "evidence_summary",
+            )
+        ):
             continue
 
         programs.append(
             DiscoveredProgram(
                 program_name=fields["program_name"],
-                provider=fields.get("provider", "Verify provider"),
-                category=fields.get("category", "Local essential program"),
-                source_url=fields.get("source_url", ""),
-                evidence_summary=fields.get("evidence_summary", ""),
+                provider=fields["provider"],
+                category=fields["category"],
+                source_url=fields["source_url"],
+                evidence_summary=fields["evidence_summary"],
                 eligibility_notes=fields.get("eligibility_notes", ""),
                 signup_path=fields.get("signup_path", ""),
                 cost_or_fees=fields.get("cost_or_fees", ""),
@@ -1435,11 +1379,6 @@ def _program_search_result_from_agent_output(
     prompt: ProgramSearchPrompt,
     search_agent_name: str,
 ) -> ProgramSearchResult:
-    if isinstance(output, ProgramSearchResult):
-        return output
-    if isinstance(output, dict):
-        return ProgramSearchResult.model_validate(output)
-
     search_text = _content_to_text(output)
     return ProgramSearchResult(
         destination=prompt.destination,
@@ -1455,27 +1394,15 @@ def _isolated_category_search_node(search_agent: LlmAgent):
     async def run_isolated_category_search(
         ctx: Context, node_input: ProgramSearchPrompt
     ) -> ProgramSearchResult:
-        try:
-            output = await ctx.run_node(
-                search_agent,
-                node_input,
-                run_id=f"{search_agent.name}_isolated",
-                use_sub_branch=True,
-                override_isolation_scope=(
-                    f"parallel_program_search:{search_agent.name}:{ctx.run_id}"
-                ),
-            )
-        except Exception as exc:
-            return ProgramSearchResult(
-                destination=node_input.destination,
-                queries_used=_queries_for_search_agent(node_input, search_agent.name),
-                discovered_programs=[],
-                search_summary="",
-                source_notes=[
-                    f"{search_agent.name} search failed: "
-                    f"{type(exc).__name__}: {exc}"
-                ],
-            )
+        output = await ctx.run_node(
+            search_agent,
+            node_input,
+            run_id=f"{search_agent.name}_isolated",
+            use_sub_branch=True,
+            override_isolation_scope=(
+                f"parallel_program_search:{search_agent.name}:{ctx.run_id}"
+            ),
+        )
 
         return _program_search_result_from_agent_output(
             output=output,
