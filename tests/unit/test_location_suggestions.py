@@ -47,6 +47,26 @@ def test_location_suggestions_use_broad_geocoder_results(monkeypatch) -> None:
     assert suggestions[-1]["source"] == "typed"
 
 
+def test_location_suggestions_include_singapore_from_geocoder(monkeypatch) -> None:
+    def singapore_result(cleaned: str, limit: int):
+        assert cleaned == "Singapore"
+        return [
+            {
+                "value": "Singapore",
+                "label": "Singapore",
+                "source": "openstreetmap",
+            }
+        ]
+
+    monkeypatch.setattr(dashboard, "_fetch_nominatim_suggestions", singapore_result)
+    monkeypatch.setattr(dashboard, "_fetch_photon_suggestions", lambda cleaned, limit: [])
+
+    suggestions = dashboard._fetch_location_suggestions("Singapore", limit=5)
+
+    assert suggestions[0]["value"] == "Singapore"
+    assert suggestions[0]["source"] == "openstreetmap"
+
+
 def test_location_suggestions_dedupe_remote_and_typed(monkeypatch) -> None:
     def duplicate_nominatim(cleaned: str, limit: int):
         return [

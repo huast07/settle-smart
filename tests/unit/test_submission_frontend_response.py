@@ -90,6 +90,24 @@ def test_dashboard_inline_javascript_parses_and_registers_form_navigation(
     assert scripts
     combined_script = "\n".join(scripts)
     assert 'nextPlaces.addEventListener("click"' in combined_script
+    assert "function immediateLocationSuggestions" in combined_script
+    assert "activeSuggestions = immediateSuggestions;" in combined_script
+    assert "renderSuggestionMenu(input, menu, activeSuggestions);" in combined_script
+    assert "timer = setTimeout" not in combined_script
+    assert "setTimeout(async" not in combined_script
+    assert "Promise.allSettled" not in combined_script
+    assert "function renderIfCurrent" in combined_script
+    assert "fetchBrowserPhotonSuggestions" in combined_script
+    assert "fetchBrowserNominatimSuggestions" in combined_script
+    assert "margin-bottom" in combined_script
+    update_suggestions_start = combined_script.index("function updateSuggestions()")
+    assert combined_script.index(
+        "renderSuggestionMenu(input, menu, activeSuggestions);",
+        update_suggestions_start,
+    ) < combined_script.index(
+        "fetchBrowserPhotonSuggestions(query",
+        update_suggestions_start,
+    )
 
     for index, script in enumerate(scripts):
         script_path = tmp_path / f"dashboard-inline-{index}.js"

@@ -64,8 +64,9 @@ newcomer-agent/
    essential categories.
 7. `build_program_search_prompt` turns those priorities into search objectives
    and official-source verification rules.
-8. `discover_local_programs` uses Google Search plus the program, eligibility,
-   verification, and signup skills to gather candidate programs.
+8. Parallel category search agents use isolated Google Search passes to gather
+   candidate programs for food/household, transit, banking/credit,
+   health/pharmacy, housing/utilities, and telecom.
 9. `recommend_programs` uses the recommendation skill to select credible top
    programs per category.
 10. The dashboard normalizes the response, groups recommendations by category,
@@ -78,14 +79,18 @@ The ADK graph is defined in `app/agent.py` as `root_agent`.
 The backend uses ADK 2.x graph workflow primitives:
 
 - `Workflow` and `@node` for explicit orchestration
-- `LlmAgent` for profile extraction, comparison, customization, search, and
-  recommendation
+- `LlmAgent` for profile extraction, comparison, customization, bounded
+  category search, and recommendation
 - `RequestInput` for human-review interrupt paths
 - Pydantic schemas for typed handoffs between nodes
 - `GoogleSearchTool` for current local program discovery
-- `SkillToolset` with local filesystem Agent Skills
+- `SkillToolset` with local filesystem Agent Skills for customization and final
+  recommendation
 
-Skills keep the model behavior modular:
+Available local skills keep the model behavior modular. The active workflow
+loads the customization and recommendation skills directly; search-related skill
+directories remain available as reusable guidance while bounded search branches
+use Google Search directly.
 
 - `customization-skill`: selects essential categories based on profile and move
   context.
@@ -220,4 +225,3 @@ does not make approval/rejection decisions; it displays agent-produced
 recommendations and a compliance review. Location autocomplete uses broad
 geocoder-backed suggestions plus a typed-location fallback, so users can enter
 any origin or destination location.
-

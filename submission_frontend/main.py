@@ -1098,6 +1098,7 @@ INDEX_HTML = """
     .suggestion-wrap {
       display: block;
       position: relative;
+      transition: margin-bottom 160ms ease;
     }
 
     .suggestion-menu {
@@ -1882,6 +1883,7 @@ INDEX_HTML = """
     function closeSuggestionMenu(input, menu) {
       menu.classList.remove("is-open");
       menu.innerHTML = "";
+      menu.closest(".suggestion-wrap")?.style.removeProperty("margin-bottom");
       input.setAttribute("aria-expanded", "false");
     }
 
@@ -1906,15 +1908,20 @@ INDEX_HTML = """
         `;
       }).join("");
       menu.classList.add("is-open");
+      menu.closest(".suggestion-wrap")?.style.setProperty("margin-bottom", `${Math.min(menu.scrollHeight + 10, 255)}px`);
       input.setAttribute("aria-expanded", "true");
     }
 
-    function formatBrowserLocationSuggestion(result) {
-      const address = result.address || {};
-      const primary = address.city || address.town || address.village || address.municipality || address.county || result.name;
-      const region = [address.state, address.province, address.region, address.country].filter(Boolean);
-      const value = [primary, ...region].filter(Boolean).join(", ") || result.display_name || "";
-      return value ? { value, label: result.display_name || value, source: "openstreetmap" } : null;
+    function typedLocationSuggestion(query) {
+      const cleanQuery = query.trim().replace(/\\s+/g, " ");
+      return cleanQuery.length >= 2
+        ? { value: cleanQuery, label: `Use "${cleanQuery}" as typed`, source: "typed" }
+        : null;
+    }
+
+    function immediateLocationSuggestions(query) {
+      const typedSuggestion = typedLocationSuggestion(query);
+      return typedSuggestion ? [typedSuggestion] : [];
     }
 
     function mergeLocationSuggestions(...groups) {
@@ -1930,7 +1937,38 @@ INDEX_HTML = """
       return merged.slice(0, 8);
     }
 
-    async function fetchBrowserLocationSuggestions(query, signal) {
+    async function fetchServerLocationSuggestions(query, signal) {
+      const url = new URL("/api/location-suggestions", window.location.origin);
+      url.searchParams.set("q", query);
+
+      try {
+        const response = await fetch(url, { signal });
+        if (!response.ok) return [];
+        const payload = await response.json();
+        return payload.suggestions || [];
+      } catch (error) {
+        if (error.name === "AbortError") throw error;
+        return [];
+      }
+    }
+
+    function formatBrowserNominatimSuggestion(result) {
+      const address = result.address || {};
+      const primary = address.city || address.town || address.village || address.municipality || address.county || result.name;
+      const region = [address.state, address.province, address.region, address.country].filter(Boolean);
+      const value = [primary, ...region].filter(Boolean).join(", ") || result.display_name || "";
+      return value ? { value, label: result.display_name || value, source: "openstreetmap" } : null;
+    }
+
+    function formatBrowserPhotonSuggestion(feature) {
+      const properties = feature.properties || {};
+      const primary = properties.city || properties.name || properties.county || properties.state;
+      const region = [properties.state, properties.country].filter(Boolean);
+      const value = [primary, ...region].filter(Boolean).join(", ");
+      return value ? { value, label: value, source: "photon" } : null;
+    }
+
+    async function fetchBrowserNominatimSuggestions(query, signal) {
       const url = new URL("https://nominatim.openstreetmap.org/search");
       url.searchParams.set("format", "jsonv2");
       url.searchParams.set("addressdetails", "1");
@@ -1939,59 +1977,78 @@ INDEX_HTML = """
       url.searchParams.set("accept-language", "en");
       url.searchParams.set("q", query);
 
-      try {
-        const response = await fetch(url, { signal });
-        if (!response.ok) return [];
-        const payload = await response.json();
-        return (Array.isArray(payload) ? payload : [])
-          .map(formatBrowserLocationSuggestion)
-          .filter(Boolean);
-      } catch (error) {
-        if (error.name === "AbortError") throw error;
-        return [];
-      }
+      const response = await fetch(url, { signal });
+      if (!response.ok) return [];
+      const payload = await response.json();
+      return (Array.isArray(payload) ? payload : [])
+        .map(formatBrowserNominatimSuggestion)
+        .filter(Boolean);
+    }
+
+    async function fetchBrowserPhotonSuggestions(query, signal) {
+      const url = new URL("https://photon.komoot.io/api/");
+      url.searchParams.set("q", query);
+      url.searchParams.set("limit", "8");
+      url.searchParams.set("lang", "en");
+
+      const response = await fetch(url, { signal });
+      if (!response.ok) return [];
+      const payload = await response.json();
+      return (payload.features || [])
+        .map(formatBrowserPhotonSuggestion)
+        .filter(Boolean);
     }
 
     function attachLocationSuggestions(input, menu) {
-      let timer = null;
       let controller = null;
+      let skipNextFocusUpdate = false;
+      let activeSuggestions = [];
 
-      input.addEventListener("input", () => {
-        clearTimeout(timer);
+      function renderIfCurrent(query, suggestions) {
+        if (input.value.trim() !== query) return;
+        activeSuggestions = mergeLocationSuggestions(suggestions, activeSuggestions);
+        renderSuggestionMenu(input, menu, activeSuggestions);
+      }
+
+      function updateSuggestions() {
         const query = input.value.trim();
+        if (controller) controller.abort();
+
         if (query.length < 2) {
+          activeSuggestions = [];
           closeSuggestionMenu(input, menu);
           return;
         }
 
-        timer = setTimeout(async () => {
-          if (controller) controller.abort();
-          controller = new AbortController();
-          const url = new URL("/api/location-suggestions", window.location.origin);
-          url.searchParams.set("q", query);
+        const immediateSuggestions = immediateLocationSuggestions(query);
+        activeSuggestions = immediateSuggestions;
+        renderSuggestionMenu(input, menu, activeSuggestions);
 
-          try {
-            const response = await fetch(url, { signal: controller.signal });
-            if (!response.ok) return;
-            const payload = await response.json();
-            let suggestions = payload.suggestions || [];
-            const onlyTyped = suggestions.length > 0 && suggestions.every((suggestion) => suggestion.source === "typed");
-            if (!suggestions.length || onlyTyped) {
-              const browserSuggestions = await fetchBrowserLocationSuggestions(query, controller.signal);
-              suggestions = mergeLocationSuggestions(browserSuggestions, suggestions);
-            }
-            renderSuggestionMenu(input, menu, suggestions);
-          } catch (error) {
-            if (error.name !== "AbortError") closeSuggestionMenu(input, menu);
-          }
-        }, 220);
-      });
+        controller = new AbortController();
+        [
+          fetchBrowserPhotonSuggestions(query, controller.signal),
+          fetchServerLocationSuggestions(query, controller.signal),
+          fetchBrowserNominatimSuggestions(query, controller.signal),
+        ].forEach((request) => {
+          request
+            .then((suggestions) => renderIfCurrent(query, suggestions))
+            .catch((error) => {
+              if (error.name === "AbortError") return;
+              if (input.value.trim() === query) {
+                renderSuggestionMenu(input, menu, activeSuggestions);
+              }
+            });
+        });
+      }
+
+      input.addEventListener("input", updateSuggestions);
 
       input.addEventListener("focus", () => {
-        if (input.value.trim().length >= 2 && menu.children.length) {
-          menu.classList.add("is-open");
-          input.setAttribute("aria-expanded", "true");
+        if (skipNextFocusUpdate) {
+          skipNextFocusUpdate = false;
+          return;
         }
+        updateSuggestions();
       });
 
       input.addEventListener("keydown", (event) => {
@@ -2003,6 +2060,7 @@ INDEX_HTML = """
         if (!option) return;
         input.value = option.dataset.value || "";
         closeSuggestionMenu(input, menu);
+        skipNextFocusUpdate = true;
         input.focus();
         if (input === destinationInput) updateDestinationCopy();
       });

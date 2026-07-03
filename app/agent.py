@@ -28,7 +28,8 @@ from google.adk.models import Gemini
 from google.adk.skills import load_skill_from_dir
 from google.adk.tools.google_search_tool import GoogleSearchTool
 from google.adk.tools.skill_toolset import SkillToolset
-from google.adk.workflow import Workflow, node
+from google.adk.utils.variant_utils import GoogleLLMVariant, get_google_llm_variant
+from google.adk.workflow import JoinNode, Workflow, node
 from google.genai import types
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -44,16 +45,36 @@ SIGNUP_PROCESS_SKILL = load_skill_from_dir(SKILLS_DIR / "signup-process-skill")
 RECOMMENDATION_SKILL = load_skill_from_dir(SKILLS_DIR / "recommendation-skill")
 
 customization_skill_toolset = SkillToolset(skills=[CUSTOMIZATION_SKILL])
-search_skill_toolset = SkillToolset(
-    skills=[
-        PROGRAM_SEARCH_SKILL,
-        ELIGIBILITY_SEARCH_SKILL,
-        VERIFICATION_SKILL,
-        SIGNUP_PROCESS_SKILL,
-    ]
-)
 recommendation_skill_toolset = SkillToolset(skills=[RECOMMENDATION_SKILL])
-google_search_with_skills = GoogleSearchTool(bypass_multi_tools_limit=True)
+
+
+def _new_search_skill_toolset() -> SkillToolset:
+    return SkillToolset(
+        skills=[
+            PROGRAM_SEARCH_SKILL,
+            ELIGIBILITY_SEARCH_SKILL,
+            VERIFICATION_SKILL,
+            SIGNUP_PROCESS_SKILL,
+        ]
+    )
+
+
+class ServerSideAwareGoogleSearchTool(GoogleSearchTool):
+    async def process_llm_request(self, *, tool_context: Any, llm_request: Any) -> None:
+        await super().process_llm_request(
+            tool_context=tool_context, llm_request=llm_request
+        )
+        if get_google_llm_variant() != GoogleLLMVariant.GEMINI_API:
+            return
+
+        llm_request.config.tool_config = (
+            llm_request.config.tool_config or types.ToolConfig()
+        )
+        llm_request.config.tool_config.include_server_side_tool_invocations = True
+
+
+def _new_google_search_tool() -> GoogleSearchTool:
+    return ServerSideAwareGoogleSearchTool(bypass_multi_tools_limit=True)
 
 
 MODEL = Gemini(
@@ -1157,38 +1178,392 @@ def build_program_search_prompt(
     )
 
 
-discover_local_programs = LlmAgent(
-    name="discover_local_programs",
-    model=MODEL,
-    input_schema=ProgramSearchPrompt,
-    output_schema=ProgramSearchResult,
-    output_key="program_search_result",
-    tools=[search_skill_toolset, google_search_with_skills],
-    instruction=(
-        "You are the search node in a graph workflow. First load these four "
-        "skills with the skill tools: `program-search-skill`, "
-        "`eligibility-search-skill`, `verification-skill`, and "
-        "`signup-process-skill`. Use Google Search to find current local "
-        "loyalty, rewards, discount, member, and essential-service programs. "
-        "Search across the supplied destination, priority categories, and "
-        "queries. For each priority category, collect enough verified candidates "
-        "for the recommendation node to choose the top three loyalty or rewards "
-        "programs when evidence supports them. For grocery and household "
-        "essentials, first identify named grocery chains serving the destination, "
-            "then search their official loyalty, rewards, member pricing, or digital "
-            "coupon pages. For cellular and telecommunications essentials, search "
-            "local mobile carriers, internet providers, public affordability "
-            "programs, multi-line offers, prepaid discounts, and bundle rewards. "
-            "For healthcare and pharmacy essentials, search both commercial "
-            "pharmacy loyalty/rewards programs and official government "
-            "healthcare or prescription benefit pages, clearly labeling which "
-            "type each candidate is. "
-            "Prefer official signup pages. Capture program name, "
-            "provider, category, source URL, evidence_summary, eligibility_notes, "
+def _parallel_search_instruction(
+    *,
+    category_scope: str,
+    focus: str,
+    output_guidance: str,
+) -> str:
+    return (
+        "You are one parallel category-search node in a graph workflow. Use "
+        "Google Search to find current local loyalty, rewards, discount, "
+        "member, and essential-service programs. Complete this in one search "
+        "and synthesis pass; do not ask follow-up questions or continue "
+        "searching after you have enough verified candidates for this narrow "
+        "scope. "
+        f"Your assigned category scope is: {category_scope}. "
+        "Search only this scope, using the destination, priority categories, "
+        "suggested queries, and verification rules from the input. Ignore "
+        "queries and categories that are clearly outside your assigned scope. "
+        f"{focus} "
+        "Prefer official provider, government, transit agency, bank, pharmacy, "
+        "retailer, utility, telecom, or signup pages. Capture program_name, "
+        "provider, category, source_url, evidence_summary, eligibility_notes, "
         "cost_or_fees, signup_path, and confidence for every discovered program. "
-        "Return only data matching the requested schema. Do not rely on memory."
+        "Return concise evidence notes as plain text, one program per line, "
+        "using this exact field pattern: Program: ...; Provider: ...; "
+        "Category: ...; Official URL: ...; Evidence: ...; Eligibility: ...; "
+        "Fees: ...; Signup: ...; Confidence: high|medium|low. Do not rely on memory. "
+        "If the input has no relevant priority category for your scope, return "
+        "the destination, the relevant queries you checked if any, and a short "
+        "source note explaining that no relevant candidates were found. "
+        f"{output_guidance}"
+    )
+
+
+def _category_search_agent(
+    *,
+    name: str,
+    category_scope: str,
+    focus: str,
+    output_key: str,
+    output_guidance: str = "",
+) -> LlmAgent:
+    return LlmAgent(
+        name=name,
+        model=MODEL,
+        input_schema=ProgramSearchPrompt,
+        output_key=output_key,
+        tools=[_new_google_search_tool()],
+        instruction=_parallel_search_instruction(
+            category_scope=category_scope,
+            focus=focus,
+            output_guidance=output_guidance,
+        ),
+    )
+
+
+discover_food_household_programs = _category_search_agent(
+    name="discover_food_household_programs",
+    category_scope=(
+        "food, groceries, supermarkets, grocery loyalty, digital coupons, "
+        "shared household essentials, family essentials, bulk purchasing, "
+        "warehouse clubs, and senior grocery discounts"
     ),
+    focus=(
+        "For grocery and household essentials, first identify named grocery "
+        "chains serving the destination, then search their official loyalty, "
+        "rewards, member pricing, digital coupon, bulk, or warehouse pages."
+    ),
+    output_key="program_search_result_food_household",
 )
+
+discover_transit_programs = _category_search_agent(
+    name="discover_transit_programs",
+    category_scope=(
+        "transit, mobility, fare discounts, reloadable fare cards, passes, "
+        "bike share, car share, senior transit discounts, and family fares"
+    ),
+    focus=(
+        "For transit and mobility, search official transit agencies, fare-card "
+        "programs, bike share, car share, senior fare, youth/family fare, and "
+        "public mobility discount pages."
+    ),
+    output_key="program_search_result_transit",
+)
+
+discover_banking_credit_programs = _category_search_agent(
+    name="discover_banking_credit_programs",
+    category_scope=(
+        "banking, newcomer bank accounts, no-fee accounts, debit rewards, "
+        "credit cards, secured cards, and credit-building offers"
+    ),
+    focus=(
+        "For banking and credit, search official bank, credit union, and card "
+        "issuer pages. Flag monthly fees, annual fees, interest, credit checks, "
+        "newcomer eligibility, and that this is not financial advice."
+    ),
+    output_key="program_search_result_banking_credit",
+)
+
+discover_health_pharmacy_programs = _category_search_agent(
+    name="discover_health_pharmacy_programs",
+    category_scope=(
+        "healthcare, commercial pharmacy rewards, prescription savings, "
+        "government healthcare benefits, public prescription benefits, and "
+        "coverage benefit programs"
+    ),
+    focus=(
+        "For healthcare and pharmacy, search both commercial pharmacy loyalty "
+        "or prescription savings programs and official government healthcare, "
+        "coverage, or prescription benefit pages. Clearly label commercial "
+        "versus government/public programs and avoid medical advice."
+    ),
+    output_key="program_search_result_health_pharmacy",
+)
+
+discover_housing_utilities_programs = _category_search_agent(
+    name="discover_housing_utilities_programs",
+    category_scope=(
+        "housing, rent rewards, tenant benefit programs, utility discounts, "
+        "energy affordability, internet affordability when tied to public "
+        "utility or household assistance, and local public assistance"
+    ),
+    focus=(
+        "For housing and utilities, search official utility, housing agency, "
+        "tenant resource, municipal, provincial/state, and provider pages. "
+        "Flag income, residency, documentation, service-area, and fee limits."
+    ),
+    output_key="program_search_result_housing_utilities",
+)
+
+discover_telecom_programs = _category_search_agent(
+    name="discover_telecom_programs",
+    category_scope=(
+        "cellular, telecommunications, mobile phone plans, prepaid plans, "
+        "internet access, telecom rewards, bundle rewards, multi-line offers, "
+        "device requirements, and telecom affordability programs"
+    ),
+    focus=(
+        "For cellular and telecommunications, search local mobile carriers, "
+        "internet providers, public affordability programs, multi-line offers, "
+        "prepaid discounts, and bundle rewards. Verify service-area coverage."
+    ),
+    output_key="program_search_result_telecom",
+)
+
+
+PROGRAM_NOTE_FIELD_RE = re.compile(
+    r"(program(?: name)?|provider|category|official url|url|source url|"
+    r"evidence|eligibility|fees?|cost|signup|confidence)\s*:\s*([^;\n]+)",
+    re.IGNORECASE,
+)
+
+
+QUERY_KEYWORDS_BY_AGENT: dict[str, tuple[str, ...]] = {
+    "discover_food_household_programs": (
+        "food",
+        "grocery",
+        "supermarket",
+        "household",
+        "warehouse",
+    ),
+    "discover_transit_programs": ("transit", "fare", "mobility", "bike", "car"),
+    "discover_banking_credit_programs": (
+        "bank",
+        "banking",
+        "credit",
+        "secured",
+    ),
+    "discover_health_pharmacy_programs": (
+        "health",
+        "healthcare",
+        "pharmacy",
+        "prescription",
+    ),
+    "discover_housing_utilities_programs": (
+        "housing",
+        "rent",
+        "utility",
+        "energy",
+    ),
+    "discover_telecom_programs": (
+        "telecom",
+        "cell",
+        "mobile",
+        "internet",
+        "phone",
+    ),
+}
+
+
+def _queries_for_search_agent(
+    prompt: ProgramSearchPrompt, search_agent_name: str
+) -> list[str]:
+    keywords = QUERY_KEYWORDS_BY_AGENT.get(search_agent_name, ())
+    if not keywords:
+        return prompt.suggested_queries[:3]
+
+    matches = [
+        query
+        for query in prompt.suggested_queries
+        if any(keyword in query.casefold() for keyword in keywords)
+    ]
+    return matches or prompt.suggested_queries[:3]
+
+
+def _parse_program_notes(search_text: str) -> list[DiscoveredProgram]:
+    programs: list[DiscoveredProgram] = []
+    for raw_line in search_text.splitlines():
+        line = re.sub(r"^\s*(?:[-*]\s+|\d+[.)]\s+)", "", raw_line).strip()
+        if not line or "program" not in line.casefold():
+            continue
+
+        fields: dict[str, str] = {}
+        for match in PROGRAM_NOTE_FIELD_RE.finditer(line):
+            key = match.group(1).casefold().replace(" ", "_")
+            value = match.group(2).strip().strip("`*")
+            if key in {"program", "program_name"}:
+                fields["program_name"] = value
+            elif key == "official_url":
+                fields["source_url"] = value
+            elif key in {"url", "source_url"}:
+                fields["source_url"] = value
+            elif key in {"fees", "fee", "cost"}:
+                fields["cost_or_fees"] = value
+            elif key == "evidence":
+                fields["evidence_summary"] = value
+            elif key == "eligibility":
+                fields["eligibility_notes"] = value
+            elif key == "signup":
+                fields["signup_path"] = value
+            else:
+                fields[key] = value
+
+        if not fields.get("program_name"):
+            continue
+
+        programs.append(
+            DiscoveredProgram(
+                program_name=fields["program_name"],
+                provider=fields.get("provider", "Verify provider"),
+                category=fields.get("category", "Local essential program"),
+                source_url=fields.get("source_url", ""),
+                evidence_summary=fields.get("evidence_summary", ""),
+                eligibility_notes=fields.get("eligibility_notes", ""),
+                signup_path=fields.get("signup_path", ""),
+                cost_or_fees=fields.get("cost_or_fees", ""),
+                confidence=fields.get("confidence", "medium").casefold(),
+            )
+        )
+    return programs
+
+
+def _program_search_result_from_agent_output(
+    *,
+    output: Any,
+    prompt: ProgramSearchPrompt,
+    search_agent_name: str,
+) -> ProgramSearchResult:
+    if isinstance(output, ProgramSearchResult):
+        return output
+    if isinstance(output, dict):
+        return ProgramSearchResult.model_validate(output)
+
+    search_text = _content_to_text(output)
+    return ProgramSearchResult(
+        destination=prompt.destination,
+        queries_used=_queries_for_search_agent(prompt, search_agent_name),
+        discovered_programs=_parse_program_notes(search_text),
+        search_summary=search_text,
+        source_notes=[f"{search_agent_name} completed a bounded Google Search pass."],
+    )
+
+
+def _isolated_category_search_node(search_agent: LlmAgent):
+    @node(name=search_agent.name, rerun_on_resume=True)
+    async def run_isolated_category_search(
+        ctx: Context, node_input: ProgramSearchPrompt
+    ) -> ProgramSearchResult:
+        try:
+            output = await ctx.run_node(
+                search_agent,
+                node_input,
+                run_id=f"{search_agent.name}_isolated",
+                use_sub_branch=True,
+                override_isolation_scope=(
+                    f"parallel_program_search:{search_agent.name}:{ctx.run_id}"
+                ),
+            )
+        except Exception as exc:
+            return ProgramSearchResult(
+                destination=node_input.destination,
+                queries_used=_queries_for_search_agent(node_input, search_agent.name),
+                discovered_programs=[],
+                search_summary="",
+                source_notes=[
+                    f"{search_agent.name} search failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ],
+            )
+
+        return _program_search_result_from_agent_output(
+            output=output,
+            prompt=node_input,
+            search_agent_name=search_agent.name,
+        )
+
+    return run_isolated_category_search
+
+
+PARALLEL_PROGRAM_SEARCH_AGENTS = (
+    _isolated_category_search_node(discover_food_household_programs),
+    _isolated_category_search_node(discover_transit_programs),
+    _isolated_category_search_node(discover_banking_credit_programs),
+    _isolated_category_search_node(discover_health_pharmacy_programs),
+    _isolated_category_search_node(discover_housing_utilities_programs),
+    _isolated_category_search_node(discover_telecom_programs),
+)
+
+parallel_program_search_join = JoinNode(name="parallel_program_search_join")
+
+
+def _program_search_result_from_any(value: Any) -> ProgramSearchResult:
+    if isinstance(value, ProgramSearchResult):
+        return value
+    return ProgramSearchResult.model_validate(value)
+
+
+def _program_key(program: DiscoveredProgram) -> tuple[str, str, str, str]:
+    return (
+        program.program_name.casefold().strip(),
+        program.provider.casefold().strip(),
+        program.category.casefold().strip(),
+        program.source_url.casefold().strip(),
+    )
+
+
+def _merge_parallel_program_search_results(
+    node_input: dict[str, Any] | list[Any] | ProgramSearchResult,
+) -> Event:
+    if isinstance(node_input, ProgramSearchResult):
+        results = [node_input]
+    elif isinstance(node_input, list):
+        results = [_program_search_result_from_any(value) for value in node_input]
+    elif isinstance(node_input, dict):
+        results = [
+            _program_search_result_from_any(value)
+            for value in node_input.values()
+            if value
+        ]
+    else:
+        results = [_program_search_result_from_any(node_input)]
+
+    destination = next(
+        (result.destination for result in results if result.destination.strip()),
+        "",
+    )
+    queries_used: list[str] = []
+    source_notes: list[str] = []
+    search_summaries: list[str] = []
+    programs_by_key: dict[tuple[str, str, str, str], DiscoveredProgram] = {}
+
+    for result in results:
+        queries_used.extend(result.queries_used)
+        source_notes.extend(result.source_notes)
+        if result.search_summary.strip():
+            search_summaries.append(result.search_summary.strip())
+        for program in result.discovered_programs:
+            key = _program_key(program)
+            if key not in programs_by_key:
+                programs_by_key[key] = program
+
+    merged = ProgramSearchResult(
+        destination=destination,
+        queries_used=list(dict.fromkeys(query for query in queries_used if query)),
+        discovered_programs=list(programs_by_key.values()),
+        search_summary="\n\n".join(search_summaries),
+        source_notes=list(dict.fromkeys(note for note in source_notes if note)),
+    )
+    return Event(
+        output=merged,
+        state={"program_search_result": merged.model_dump()},
+    )
+
+
+merge_parallel_program_search_results = node(
+    name="merge_parallel_program_search_results"
+)(_merge_parallel_program_search_results)
 
 
 @node(name="package_program_research")
@@ -1369,11 +1744,14 @@ root_agent = Workflow(
         (compare_origin_destination, build_customization_context),
         (build_customization_context, customize_essentials),
         (customize_essentials, build_program_search_prompt),
-        (build_program_search_prompt, discover_local_programs),
-        (discover_local_programs, package_program_research),
+        (build_program_search_prompt, PARALLEL_PROGRAM_SEARCH_AGENTS),
+        (PARALLEL_PROGRAM_SEARCH_AGENTS, parallel_program_search_join),
+        (parallel_program_search_join, merge_parallel_program_search_results),
+        (merge_parallel_program_search_results, package_program_research),
         (package_program_research, recommend_programs),
         (recommend_programs, final_response),
     ],
+    max_concurrency=4,
 )
 
 app = App(
