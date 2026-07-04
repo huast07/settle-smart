@@ -217,11 +217,3 @@ concurrency: 1
 timeout: 600
 max instances: 1
 ```
-
-## Notes for Submission
-
-This project intentionally avoids hardcoded recommendation results. The frontend
-does not make approval/rejection decisions; it displays agent-produced
-recommendations and a compliance review. Location autocomplete uses broad
-geocoder-backed suggestions plus a typed-location fallback, so users can enter
-any origin or destination location.
