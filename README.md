@@ -1,4 +1,4 @@
-# Settle Smart: Newcomer Rewards Navigator
+# Settle Smart: Newcomer Rewards Navigator (NO LONGER MAINTAINED)
 
 Settle Smart is an ADK-powered webapp that helps a newcomer or case manager find
 local loyalty, rewards, discount, and essential-service programs for a destination
